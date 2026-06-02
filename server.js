@@ -8,25 +8,24 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
-const GOOGLE_CSE_ID  = process.env.GOOGLE_CSE_ID  || '';
+const SERPER_API_KEY = process.env.SERPER_API_KEY || '';
 
-/* ── Google Custom Search ─────────────────────────────────── */
-async function googleSearch(query, startIndex = 1) {
-  const params = new URLSearchParams({
-    key: GOOGLE_API_KEY,
-    cx:  GOOGLE_CSE_ID,
-    q:   query,
-    num: 10,
-    start: startIndex
+/* ── Serper Search ────────────────────────────────────────── */
+async function serperSearch(query) {
+  const res = await fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: {
+      'X-API-KEY': SERPER_API_KEY,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ q: query, num: 10, gl: 'us', hl: 'en' })
   });
-  const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
-  if (!res.ok) throw new Error(`Google API error ${res.status}`);
+  if (!res.ok) throw new Error(`Serper API error ${res.status}`);
   return res.json();
 }
 
-/* ── Parse Google result into listing format ──────────────── */
-function parseGoogleItem(item) {
+/* ── Parse Serper result into listing format ──────────────── */
+function parseSerperItem(item) {
   const title   = item.title || '';
   const link    = item.link  || '';
   const snippet = item.snippet || '';
@@ -36,11 +35,7 @@ function parseGoogleItem(item) {
 
   const price = (title + ' ' + snippet).match(/\$[\d,]+/)?.[0] || null;
   const year  = (title + ' ' + snippet).match(/\b(19|20)\d{2}\b/)?.[0] || null;
-
-  // Try to get image from pagemap
-  const image = item.pagemap?.cse_image?.[0]?.src
-    || item.pagemap?.metatags?.[0]?.['og:image']
-    || null;
+  const image = item.imageUrl || null;
 
   const location = (() => {
     const m = (title + ' ' + snippet).match(/\b(Houston|Dallas|San Antonio|Austin|El Paso|Laredo|Texas|TX)\b/i);
@@ -81,22 +76,22 @@ app.get('/search/stream', async (req, res) => {
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
   const searches = [
-    `${query} semi truck for sale Texas`,
-    `${query} commercial truck Texas site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com`,
+    { label: 'Google Results',  q: `${query} semi truck for sale Texas` },
+    { label: 'Classifieds',     q: `${query} truck site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com` },
   ];
 
   send('start', { total_cities: searches.length, query });
 
   let total = 0;
 
-  for (let i = 0; i < searches.length; i++) {
+  for (const s of searches) {
     try {
-      const data  = await googleSearch(searches[i], 1);
-      const items = (data.items || []).map(parseGoogleItem);
+      const data  = await serperSearch(s.q);
+      const items = (data.organic || []).map(parseSerperItem);
       total += items.length;
-      send('city', { city: i === 0 ? 'Google Search' : 'Classifieds', ok: true, count: items.length, items });
+      send('city', { city: s.label, ok: true, count: items.length, items });
     } catch(e) {
-      send('city', { city: i === 0 ? 'Google Search' : 'Classifieds', ok: false, error: e.message, items: [] });
+      send('city', { city: s.label, ok: false, error: e.message, items: [] });
     }
   }
 
@@ -109,22 +104,21 @@ app.get('/search', async (req, res) => {
   const query = (req.query.q || 'semi truck').trim();
 
   const searches = [
-    `${query} semi truck for sale Texas`,
-    `${query} commercial truck Texas site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com`,
+    { label: 'Google Results',  q: `${query} semi truck for sale Texas` },
+    { label: 'Classifieds',     q: `${query} truck site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com` },
   ];
 
   const results  = [];
   const statuses = {};
 
-  for (let i = 0; i < searches.length; i++) {
-    const label = i === 0 ? 'Google Search' : 'Classifieds';
+  for (const s of searches) {
     try {
-      const data  = await googleSearch(searches[i]);
-      const items = (data.items || []).map(parseGoogleItem);
+      const data  = await serperSearch(s.q);
+      const items = (data.organic || []).map(parseSerperItem);
       results.push(...items);
-      statuses[label] = { ok: true, count: items.length };
+      statuses[s.label] = { ok: true, count: items.length };
     } catch(e) {
-      statuses[label] = { ok: false, error: e.message };
+      statuses[s.label] = { ok: false, error: e.message };
     }
   }
 
