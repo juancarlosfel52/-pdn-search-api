@@ -91,14 +91,18 @@ app.get('/search', async (req, res) => {
         austin:'Austin', elpaso:'El Paso', laredo:'Laredo'
       }[key] || key;
 
-      const url = `${baseUrl}/search/ttt?format=rss&query=${encodeURIComponent(query)}`;
+      const clUrl   = `${baseUrl}/search/ttt?format=rss&query=${encodeURIComponent(query)}`;
+      const SCRAPER_KEY = process.env.SCRAPER_API_KEY || '';
+      const url = SCRAPER_KEY
+        ? `http://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(clUrl)}`
+        : clUrl;
       try {
         const resp = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/rss+xml, application/xml, text/xml, */*'
           },
-          timeout: 10000
+          timeout: 15000
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const text = await resp.text();
