@@ -9,7 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 const SERPER_API_KEY  = process.env.SERPER_API_KEY  || '';
-const CLAUDE_API_KEY  = process.env.CLAUDE_API_KEY  || '';
+const CLAUDE_API_KEY  = process.env.IMAGE_API_KEY   || '';
 
 /* ── Serper Search ────────────────────────────────────────── */
 async function serperSearch(query) {
