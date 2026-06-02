@@ -142,13 +142,12 @@ app.get('/search/stream', async (req, res) => {
 
   let totalCount = 0;
 
-  await Promise.allSettled(
-    cities.map(async ([key, baseUrl]) => {
-      const result = await fetchCity(key, baseUrl, query);
-      totalCount += result.items.length;
-      send('city', result);
-    })
-  );
+  // Sequential — one city at a time to respect ScraperAPI rate limits
+  for (const [key, baseUrl] of cities) {
+    const result = await fetchCity(key, baseUrl, query);
+    totalCount += result.items.length;
+    send('city', result);
+  }
 
   send('done', { total: totalCount, query });
   res.end();
@@ -165,13 +164,12 @@ app.get('/search', async (req, res) => {
   const results  = [];
   const statuses = {};
 
-  await Promise.allSettled(
-    cities.map(async ([key, baseUrl]) => {
-      const result = await fetchCity(key, baseUrl, query);
-      results.push(...result.items);
-      statuses[result.city] = { ok: result.ok, count: result.count || 0, error: result.error };
-    })
-  );
+  // Sequential — one city at a time to respect ScraperAPI rate limits
+  for (const [key, baseUrl] of cities) {
+    const result = await fetchCity(key, baseUrl, query);
+    results.push(...result.items);
+    statuses[result.city] = { ok: result.ok, count: result.count || 0, error: result.error };
+  }
 
   res.json({ query, total: results.length, statuses, listings: results });
 });
