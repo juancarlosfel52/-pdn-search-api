@@ -8,167 +8,124 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-/* ── City map ─────────────────────────────────────────────── */
-const CL_CITIES = {
-  houston:     'https://houston.craigslist.org',
-  dallas:      'https://dallas.craigslist.org',
-  sanantonio:  'https://sanantonio.craigslist.org',
-  austin:      'https://austin.craigslist.org',
-  elpaso:      'https://elpaso.craigslist.org',
-  laredo:      'https://laredo.craigslist.org',
-};
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || '';
+const GOOGLE_CSE_ID  = process.env.GOOGLE_CSE_ID  || '';
 
-const DISPLAY_NAMES = {
-  houston:'Houston', dallas:'Dallas', sanantonio:'San Antonio',
-  austin:'Austin', elpaso:'El Paso', laredo:'Laredo'
-};
-
-/* ── Parse Craigslist RSS ─────────────────────────────────── */
-function parseRSS(xmlText, cityName) {
-  const items = [];
-  const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-  let match;
-
-  while ((match = itemRegex.exec(xmlText)) !== null) {
-    const block = match[1];
-
-    const get = (tag) => {
-      const m = block.match(new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>|<${tag}[^>]*>([^<]*)<\\/${tag}>`));
-      return m ? (m[1] || m[2] || '').trim() : '';
-    };
-
-    const title    = get('title');
-    const link     = get('link') || (block.match(/<link\s*\/>([^<]+)/)?.[1] || '').trim();
-    const desc     = get('description').replace(/<[^>]*>/g, '').trim();
-    const pubDate  = get('pubDate');
-
-    const encMatch = block.match(/url="([^"]+\.jpg[^"]*)"/i);
-    const image    = encMatch ? encMatch[1] : null;
-
-    const price = title.match(/\$[\d,]+/)?.[0] || null;
-    const year  = title.match(/\b(19|20)\d{2}\b/)?.[0] || null;
-    const cleanTitle = title.replace(/\s*[-–]\s*\$[\d,]+/, '').trim();
-
-    if (!cleanTitle) continue;
-
-    items.push({
-      id:          link + '-' + Date.now() + Math.random(),
-      title:       cleanTitle,
-      price,
-      year,
-      mileage:     null,
-      location:    cityName + ', TX',
-      image,
-      url:         link,
-      source:      'Craigslist',
-      description: desc.slice(0, 300),
-      posted:      pubDate,
-      seller: {
-        name:  'Private Seller / Dealer',
-        phone: 'See listing',
-        email: 'Via Craigslist'
-      },
-      sellerTrust: 'new',
-      trustNote:   'Craigslist listing — verify seller independently'
-    });
-  }
-
-  return items;
+/* ── Google Custom Search ─────────────────────────────────── */
+async function googleSearch(query, startIndex = 1) {
+  const params = new URLSearchParams({
+    key: GOOGLE_API_KEY,
+    cx:  GOOGLE_CSE_ID,
+    q:   query,
+    num: 10,
+    start: startIndex
+  });
+  const res = await fetch(`https://www.googleapis.com/customsearch/v1?${params}`);
+  if (!res.ok) throw new Error(`Google API error ${res.status}`);
+  return res.json();
 }
 
-/* ── Fetch one city ───────────────────────────────────────── */
-async function fetchCity(key, baseUrl, query) {
-  const displayName = DISPLAY_NAMES[key] || key;
-  const SCRAPER_KEY = process.env.SCRAPER_API_KEY || '';
+/* ── Parse Google result into listing format ──────────────── */
+function parseGoogleItem(item) {
+  const title   = item.title || '';
+  const link    = item.link  || '';
+  const snippet = item.snippet || '';
+  const source  = (() => {
+    try { return new URL(link).hostname.replace('www.',''); } catch(_) { return 'Web'; }
+  })();
 
-  // Try hva (heavy vehicles) first, fall back to sss (all for sale)
-  const categories = ['hva', 'sss'];
+  const price = (title + ' ' + snippet).match(/\$[\d,]+/)?.[0] || null;
+  const year  = (title + ' ' + snippet).match(/\b(19|20)\d{2}\b/)?.[0] || null;
 
-  for (const cat of categories) {
-    const clUrl = `${baseUrl}/search/${cat}?format=rss&query=${encodeURIComponent(query)}`;
-    const url = SCRAPER_KEY
-      ? `http://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(clUrl)}`
-      : clUrl;
+  // Try to get image from pagemap
+  const image = item.pagemap?.cse_image?.[0]?.src
+    || item.pagemap?.metatags?.[0]?.['og:image']
+    || null;
 
-    try {
-      const resp = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/rss+xml, application/xml, text/xml, */*'
-        },
-        timeout: 20000
-      });
+  const location = (() => {
+    const m = (title + ' ' + snippet).match(/\b(Houston|Dallas|San Antonio|Austin|El Paso|Laredo|Texas|TX)\b/i);
+    return m ? m[0] + (m[0].match(/Texas|TX/i) ? '' : ', TX') : 'Texas';
+  })();
 
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const text = await resp.text();
-      if (text.trimStart().startsWith('<html') || text.trimStart().startsWith('<!')) {
-        throw new Error('Block page');
-      }
-
-      const items = parseRSS(text, displayName);
-      if (items.length > 0 || cat === 'sss') {
-        return { city: displayName, ok: true, count: items.length, items, category: cat };
-      }
-      // If hva returned 0 results, try sss
-    } catch(e) {
-      if (cat === 'sss') {
-        return { city: displayName, ok: false, error: e.message, items: [], category: cat };
-      }
-      // Try next category
-    }
-  }
-
-  return { city: displayName, ok: false, error: 'No results', items: [] };
+  return {
+    id:          link + '-' + Math.random(),
+    title:       title.replace(/\s*[-|]\s*.+$/, '').trim(),
+    price,
+    year,
+    mileage:     null,
+    location,
+    image,
+    url:         link,
+    source:      source.includes('craigslist') ? 'Craigslist' : source,
+    description: snippet.slice(0, 300),
+    posted:      null,
+    seller: {
+      name:  'See listing',
+      phone: 'See listing',
+      email: 'See listing'
+    },
+    sellerTrust: 'new',
+    trustNote:   'Verify seller independently'
+  };
 }
 
-/* ── GET /search/stream (SSE — live city-by-city) ─────────── */
+/* ── GET /search/stream (SSE) ─────────────────────────────── */
 app.get('/search/stream', async (req, res) => {
-  const query  = (req.query.q || 'semi truck').trim();
-  const cityQ  = (req.query.city || '').toLowerCase().replace(/\s+/g, '');
-  const cities = cityQ
-    ? Object.entries(CL_CITIES).filter(([k]) => k.includes(cityQ))
-    : Object.entries(CL_CITIES);
+  const query = (req.query.q || 'semi truck').trim();
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const send = (event, data) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-  send('start', { total_cities: cities.length, query });
+  const searches = [
+    `${query} semi truck for sale Texas`,
+    `${query} commercial truck Texas site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com`,
+  ];
 
-  let totalCount = 0;
+  send('start', { total_cities: searches.length, query });
 
-  // Sequential — one city at a time to respect ScraperAPI rate limits
-  for (const [key, baseUrl] of cities) {
-    const result = await fetchCity(key, baseUrl, query);
-    totalCount += result.items.length;
-    send('city', result);
+  let total = 0;
+
+  for (let i = 0; i < searches.length; i++) {
+    try {
+      const data  = await googleSearch(searches[i], 1);
+      const items = (data.items || []).map(parseGoogleItem);
+      total += items.length;
+      send('city', { city: i === 0 ? 'Google Search' : 'Classifieds', ok: true, count: items.length, items });
+    } catch(e) {
+      send('city', { city: i === 0 ? 'Google Search' : 'Classifieds', ok: false, error: e.message, items: [] });
+    }
   }
 
-  send('done', { total: totalCount, query });
+  send('done', { total, query });
   res.end();
 });
 
-/* ── GET /search (classic batch) ─────────────────────────── */
+/* ── GET /search (batch) ──────────────────────────────────── */
 app.get('/search', async (req, res) => {
-  const query  = (req.query.q || 'semi truck').trim();
-  const cityQ  = (req.query.city || '').toLowerCase().replace(/\s+/g, '');
-  const cities = cityQ
-    ? Object.entries(CL_CITIES).filter(([k]) => k.includes(cityQ))
-    : Object.entries(CL_CITIES);
+  const query = (req.query.q || 'semi truck').trim();
+
+  const searches = [
+    `${query} semi truck for sale Texas`,
+    `${query} commercial truck Texas site:craigslist.org OR site:truckpaper.com OR site:commercialtrucktrader.com`,
+  ];
 
   const results  = [];
   const statuses = {};
 
-  // Sequential — one city at a time to respect ScraperAPI rate limits
-  for (const [key, baseUrl] of cities) {
-    const result = await fetchCity(key, baseUrl, query);
-    results.push(...result.items);
-    statuses[result.city] = { ok: result.ok, count: result.count || 0, error: result.error };
+  for (let i = 0; i < searches.length; i++) {
+    const label = i === 0 ? 'Google Search' : 'Classifieds';
+    try {
+      const data  = await googleSearch(searches[i]);
+      const items = (data.items || []).map(parseGoogleItem);
+      results.push(...items);
+      statuses[label] = { ok: true, count: items.length };
+    } catch(e) {
+      statuses[label] = { ok: false, error: e.message };
+    }
   }
 
   res.json({ query, total: results.length, statuses, listings: results });
@@ -186,9 +143,8 @@ app.get('/', (_req, res) => {
       <p>Endpoints:</p>
       <ul>
         <li><a href="/health">/health</a> — health check</li>
-        <li><a href="/search?q=peterbilt">/search?q=peterbilt</a> — batch search all TX cities</li>
-        <li><a href="/search/stream?q=peterbilt">/search/stream?q=peterbilt</a> — live streaming search (SSE)</li>
-        <li>/search?q=kenworth&city=houston — search one city</li>
+        <li><a href="/search?q=peterbilt">/search?q=peterbilt</a> — batch search</li>
+        <li><a href="/search/stream?q=peterbilt">/search/stream?q=peterbilt</a> — live stream</li>
       </ul>
     </body></html>
   `);
@@ -199,6 +155,4 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'PDN Search API', ts: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`PDN Search API running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`PDN Search API running on port ${PORT}`));
