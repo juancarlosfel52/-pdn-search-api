@@ -8,7 +8,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const SERPER_API_KEY = process.env.SERPER_API_KEY || '';
+const SERPER_API_KEY  = process.env.SERPER_API_KEY  || '';
+const CLAUDE_API_KEY  = process.env.CLAUDE_API_KEY  || '';
 
 /* ── Serper Search ────────────────────────────────────────── */
 async function serperSearch(query) {
@@ -63,6 +64,97 @@ function parseSerperItem(item) {
     trustNote:   'Verify seller independently'
   };
 }
+
+/* ── GET /detail?url= ────────────────────────────────────── */
+app.get('/detail', async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).json({ error: 'url required' });
+
+  try {
+    // Fetch the listing page
+    const pageRes = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,*/*'
+      },
+      timeout: 15000
+    });
+
+    if (!pageRes.ok) throw new Error(`HTTP ${pageRes.status}`);
+    const html = await pageRes.text();
+
+    // Extract images — filter for likely truck photos (large images, not icons)
+    const imgMatches = [...html.matchAll(/<img[^>]+src=["']([^"']+)["'][^>]*>/gi)];
+    const images = imgMatches
+      .map(m => {
+        const src = m[1];
+        if (src.startsWith('//')) return 'https:' + src;
+        if (src.startsWith('/')) {
+          try { const base = new URL(url); return base.origin + src; } catch(_) { return null; }
+        }
+        return src;
+      })
+      .filter(src => src && (src.includes('.jpg') || src.includes('.jpeg') || src.includes('.png') || src.includes('.webp')))
+      .filter(src => !src.match(/logo|icon|avatar|banner|badge|pixel|tracking|1x1|spinner/i))
+      .slice(0, 10);
+
+    // Strip HTML to plain text for AI (limit size)
+    const text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 4000);
+
+    // Claude Haiku — extract structured info
+    let aiData = {};
+    if (CLAUDE_API_KEY) {
+      const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': CLAUDE_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 400,
+          messages: [{
+            role: 'user',
+            content: `Extract from this truck listing page. Return ONLY valid JSON, no explanation:
+{
+  "dealer_name": "string or null",
+  "phone": "phone number string or null",
+  "email": "email string or null",
+  "price": "$X,XXX or null",
+  "year": "YYYY or null",
+  "make": "string or null",
+  "model": "string or null",
+  "mileage": "string or null",
+  "condition": "New or Used or null",
+  "location": "City, State or null",
+  "description": "1-2 sentence summary or null"
+}
+
+Page text: ${text}`
+          }]
+        })
+      });
+
+      if (aiRes.ok) {
+        const aiJson = await aiRes.json();
+        const raw = aiJson.content?.[0]?.text || '{}';
+        try { aiData = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || '{}'); } catch(_) {}
+      }
+    }
+
+    res.json({ ok: true, images, ...aiData });
+
+  } catch(e) {
+    res.json({ ok: false, error: e.message, images: [], dealer_name: null, phone: null, email: null });
+  }
+});
 
 /* ── GET /search/stream (SSE) ─────────────────────────────── */
 app.get('/search/stream', async (req, res) => {
