@@ -18,6 +18,11 @@ const CL_CITIES = {
   laredo:      'https://laredo.craigslist.org',
 };
 
+const DISPLAY_NAMES = {
+  houston:'Houston', dallas:'Dallas', sanantonio:'San Antonio',
+  austin:'Austin', elpaso:'El Paso', laredo:'Laredo'
+};
+
 /* ── Parse Craigslist RSS ─────────────────────────────────── */
 function parseRSS(xmlText, cityName) {
   const items = [];
@@ -37,7 +42,6 @@ function parseRSS(xmlText, cityName) {
     const desc     = get('description').replace(/<[^>]*>/g, '').trim();
     const pubDate  = get('pubDate');
 
-    // Image from enclosure or img tag in description
     const encMatch = block.match(/url="([^"]+\.jpg[^"]*)"/i);
     const image    = encMatch ? encMatch[1] : null;
 
@@ -72,7 +76,85 @@ function parseRSS(xmlText, cityName) {
   return items;
 }
 
-/* ── GET /search ──────────────────────────────────────────── */
+/* ── Fetch one city ───────────────────────────────────────── */
+async function fetchCity(key, baseUrl, query) {
+  const displayName = DISPLAY_NAMES[key] || key;
+  const SCRAPER_KEY = process.env.SCRAPER_API_KEY || '';
+
+  // Try hva (heavy vehicles) first, fall back to sss (all for sale)
+  const categories = ['hva', 'sss'];
+
+  for (const cat of categories) {
+    const clUrl = `${baseUrl}/search/${cat}?format=rss&query=${encodeURIComponent(query)}`;
+    const url = SCRAPER_KEY
+      ? `http://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(clUrl)}`
+      : clUrl;
+
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+        },
+        timeout: 20000
+      });
+
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      if (text.trimStart().startsWith('<html') || text.trimStart().startsWith('<!')) {
+        throw new Error('Block page');
+      }
+
+      const items = parseRSS(text, displayName);
+      if (items.length > 0 || cat === 'sss') {
+        return { city: displayName, ok: true, count: items.length, items, category: cat };
+      }
+      // If hva returned 0 results, try sss
+    } catch(e) {
+      if (cat === 'sss') {
+        return { city: displayName, ok: false, error: e.message, items: [], category: cat };
+      }
+      // Try next category
+    }
+  }
+
+  return { city: displayName, ok: false, error: 'No results', items: [] };
+}
+
+/* ── GET /search/stream (SSE — live city-by-city) ─────────── */
+app.get('/search/stream', async (req, res) => {
+  const query  = (req.query.q || 'semi truck').trim();
+  const cityQ  = (req.query.city || '').toLowerCase().replace(/\s+/g, '');
+  const cities = cityQ
+    ? Object.entries(CL_CITIES).filter(([k]) => k.includes(cityQ))
+    : Object.entries(CL_CITIES);
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  send('start', { total_cities: cities.length, query });
+
+  let totalCount = 0;
+
+  await Promise.allSettled(
+    cities.map(async ([key, baseUrl]) => {
+      const result = await fetchCity(key, baseUrl, query);
+      totalCount += result.items.length;
+      send('city', result);
+    })
+  );
+
+  send('done', { total: totalCount, query });
+  res.end();
+});
+
+/* ── GET /search (classic batch) ─────────────────────────── */
 app.get('/search', async (req, res) => {
   const query  = (req.query.q || 'semi truck').trim();
   const cityQ  = (req.query.city || '').toLowerCase().replace(/\s+/g, '');
@@ -85,45 +167,13 @@ app.get('/search', async (req, res) => {
 
   await Promise.allSettled(
     cities.map(async ([key, baseUrl]) => {
-      const cityName = key.charAt(0).toUpperCase() + key.slice(1).replace('sanantonio','San Antonio').replace('elpaso','El Paso');
-      const displayName = {
-        houston:'Houston', dallas:'Dallas', sanantonio:'San Antonio',
-        austin:'Austin', elpaso:'El Paso', laredo:'Laredo'
-      }[key] || key;
-
-      const clUrl   = `${baseUrl}/search/ttt?format=rss&query=${encodeURIComponent(query)}`;
-      const SCRAPER_KEY = process.env.SCRAPER_API_KEY || '';
-      const url = SCRAPER_KEY
-        ? `http://api.scraperapi.com?api_key=${SCRAPER_KEY}&url=${encodeURIComponent(clUrl)}`
-        : clUrl;
-      try {
-        const resp = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/rss+xml, application/xml, text/xml, */*'
-          },
-          timeout: 15000
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const text = await resp.text();
-        if (text.trimStart().startsWith('<html') || text.trimStart().startsWith('<!')) {
-          throw new Error('Block page');
-        }
-        const items = parseRSS(text, displayName);
-        results.push(...items);
-        statuses[displayName] = { ok: true, count: items.length };
-      } catch(e) {
-        statuses[displayName] = { ok: false, error: e.message };
-      }
+      const result = await fetchCity(key, baseUrl, query);
+      results.push(...result.items);
+      statuses[result.city] = { ok: result.ok, count: result.count || 0, error: result.error };
     })
   );
 
-  res.json({
-    query,
-    total:    results.length,
-    statuses,
-    listings: results
-  });
+  res.json({ query, total: results.length, statuses, listings: results });
 });
 
 /* ── GET / ────────────────────────────────────────────────── */
@@ -138,7 +188,8 @@ app.get('/', (_req, res) => {
       <p>Endpoints:</p>
       <ul>
         <li><a href="/health">/health</a> — health check</li>
-        <li><a href="/search?q=peterbilt">/search?q=peterbilt</a> — search all TX cities</li>
+        <li><a href="/search?q=peterbilt">/search?q=peterbilt</a> — batch search all TX cities</li>
+        <li><a href="/search/stream?q=peterbilt">/search/stream?q=peterbilt</a> — live streaming search (SSE)</li>
         <li>/search?q=kenworth&city=houston — search one city</li>
       </ul>
     </body></html>
