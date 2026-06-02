@@ -122,6 +122,25 @@ app.get('/search', async (req, res) => {
   });
 });
 
+/* ── GET / ────────────────────────────────────────────────── */
+app.get('/', (_req, res) => {
+  res.send(`
+    <html><head><title>PDN Search API</title>
+    <style>body{font-family:monospace;background:#060608;color:#f4f4f5;padding:40px;}
+    h1{color:#f59e0b;}a{color:#f59e0b;}</style></head>
+    <body>
+      <h1>🚛 Paso Del Norte — Search API</h1>
+      <p>Status: <strong style="color:#22c55e">ONLINE</strong></p>
+      <p>Endpoints:</p>
+      <ul>
+        <li><a href="/health">/health</a> — health check</li>
+        <li><a href="/search?q=peterbilt">/search?q=peterbilt</a> — search all TX cities</li>
+        <li>/search?q=kenworth&city=houston — search one city</li>
+      </ul>
+    </body></html>
+  `);
+});
+
 /* ── GET /health ──────────────────────────────────────────── */
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'PDN Search API', ts: new Date().toISOString() });
